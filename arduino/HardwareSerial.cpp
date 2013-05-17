@@ -18,6 +18,7 @@
   
   Modified 23 November 2006 by David A. Mellis
   Modified 28 September 2010 by Mark Sproul
+  Modified 14 August 2012 by Alarus
 */
 
 #include <stdlib.h>
@@ -27,12 +28,26 @@
 #include "Arduino.h"
 #include "wiring_private.h"
 
-
 // this next line disables the entire HardwareSerial.cpp, 
 // this is so I can support Attiny series and any other chip without a uart
 #if defined(UBRRH) || defined(UBRR0H) || defined(UBRR1H) || defined(UBRR2H) || defined(UBRR3H)
 
 #include "HardwareSerial.h"
+
+/*
+ * on ATmega8, the uart and its bits are not numbered, so there is no "TXC0"
+ * definition.
+ */
+#if !defined(TXC0)
+#if defined(TXC)
+#define TXC0 TXC
+#elif defined(TXC1)
+// Some devices have uart1 but no uart0
+#define TXC0 TXC1
+#else
+#error TXC0 not definable in HardwareSerial.h
+#endif
+#endif
 
 // Define constants and variables for buffering incoming serial data.  We're
 // using a ring buffer (I think), in which head is the index of the location
@@ -110,13 +125,22 @@ inline void store_char(unsigned char c, ring_buffer *buffer)
 #endif
   {
   #if defined(UDR0)
-    unsigned char c  =  UDR0;
+    if (bit_is_clear(UCSR0A, UPE0)) {
+      unsigned char c = UDR0;
+      store_char(c, &rx_buffer);
+    } else {
+      unsigned char c = UDR0;
+    };
   #elif defined(UDR)
-    unsigned char c  =  UDR;
+    if (bit_is_clear(UCSRA, PE)) {
+      unsigned char c = UDR;
+      store_char(c, &rx_buffer);
+    } else {
+      unsigned char c = UDR;
+    };
   #else
     #error UDR not defined
   #endif
-    store_char(c, &rx_buffer);
   }
 #endif
 #endif
@@ -127,8 +151,12 @@ inline void store_char(unsigned char c, ring_buffer *buffer)
   #define serialEvent1_implemented
   SIGNAL(USART1_RX_vect)
   {
-    unsigned char c = UDR1;
-    store_char(c, &rx_buffer1);
+    if (bit_is_clear(UCSR1A, UPE1)) {
+      unsigned char c = UDR1;
+      store_char(c, &rx_buffer1);
+    } else {
+      unsigned char c = UDR1;
+    };
   }
 #elif defined(SIG_USART1_RECV)
   #error SIG_USART1_RECV
@@ -140,8 +168,12 @@ inline void store_char(unsigned char c, ring_buffer *buffer)
   #define serialEvent2_implemented
   SIGNAL(USART2_RX_vect)
   {
-    unsigned char c = UDR2;
-    store_char(c, &rx_buffer2);
+    if (bit_is_clear(UCSR2A, UPE2)) {
+      unsigned char c = UDR2;
+      store_char(c, &rx_buffer2);
+    } else {
+      unsigned char c = UDR2;
+    };
   }
 #elif defined(SIG_USART2_RECV)
   #error SIG_USART2_RECV
@@ -153,8 +185,12 @@ inline void store_char(unsigned char c, ring_buffer *buffer)
   #define serialEvent3_implemented
   SIGNAL(USART3_RX_vect)
   {
-    unsigned char c = UDR3;
-    store_char(c, &rx_buffer3);
+    if (bit_is_clear(UCSR3A, UPE3)) {
+      unsigned char c = UDR3;
+      store_char(c, &rx_buffer3);
+    } else {
+      unsigned char c = UDR3;
+    };
   }
 #elif defined(SIG_USART3_RECV)
   #error SIG_USART3_RECV
@@ -274,12 +310,9 @@ ISR(USART3_UDRE_vect)
 
 HardwareSerial::HardwareSerial(ring_buffer *rx_buffer, ring_buffer *tx_buffer,
   volatile uint8_t *ubrrh, volatile uint8_t *ubrrl,
-  volatile uint8_t *ucsra, volatile uint8_t *ucsrb,volatile uint8_t *ucsrc,
-  volatile uint8_t *udr,
-  uint8_t rxen, uint8_t txen, uint8_t rxcie, uint8_t udrie, uint8_t u2x,
-  uint8_t ucsz0,
-  uint8_t upm0,
-  uint8_t usbs)
+  volatile uint8_t *ucsra, volatile uint8_t *ucsrb,
+  volatile uint8_t *ucsrc, volatile uint8_t *udr,
+  uint8_t rxen, uint8_t txen, uint8_t rxcie, uint8_t udrie, uint8_t u2x)
 {
   _rx_buffer = rx_buffer;
   _tx_buffer = tx_buffer;
@@ -294,9 +327,6 @@ HardwareSerial::HardwareSerial(ring_buffer *rx_buffer, ring_buffer *tx_buffer,
   _rxcie = rxcie;
   _udrie = udrie;
   _u2x = u2x;
-  _ucsz0 = ucsz0;
-  _upm0 = upm0;
-  _usbs = usbs;
 }
 
 // Public Methods //////////////////////////////////////////////////////////////
@@ -330,92 +360,73 @@ try_again:
     use_u2x = false;
     goto try_again;
   }
-  //set 9 bit off in *_ucsrb here to be sure its 0
-  *_ucsrb &= 4;
+
   // assign the baud_setting, a.k.a. ubbr (USART Baud Rate Register)
   *_ubrrh = baud_setting >> 8;
   *_ubrrl = baud_setting;
+
+  transmitting = false;
 
   sbi(*_ucsrb, _rxen);
   sbi(*_ucsrb, _txen);
   sbi(*_ucsrb, _rxcie);
   cbi(*_ucsrb, _udrie);
 }
-// open a serial port
-//  parameters:
-//    - baud rate ( 1953 to 1000000 baud for 8Mhz, 3906 to 2000000 for 16Mhz )
-//        default = 9600
-//    - character/data bits ( 5, 6, 7, or 8 )
-//        default = 8
-//    - stop bits ( 1 or 2 )
-//        default = 1
-//    - parity ( 0 = none, 1 = odd, 2 = even )
-//        default = 0
-void HardwareSerial::begin(const uint32_t baud, const uint8_t data_bits, const uint8_t stop_bits, const uint8_t parity)
+
+void HardwareSerial::begin(unsigned long baud, byte config)
 {
-	uint16_t baud_setting;
-	  bool use_u2x = true;
+  uint16_t baud_setting;
+  uint8_t current_config;
+  bool use_u2x = true;
 
-	#if F_CPU == 16000000UL
-	  // hardcoded exception for compatibility with the bootloader shipped
-	  // with the Duemilanove and previous boards and the firmware on the 8U2
-	  // on the Uno and Mega 2560.
-	  if (baud == 57600) {
-	    use_u2x = false;
-	  }
-	#endif
-        uint8_t frame_format=0;
-        *_ucsrb=0;
-        // U2X mode is needed for baud rates higher than ( Hz / 16 )
-        try_again:
+#if F_CPU == 16000000UL
+  // hardcoded exception for compatibility with the bootloader shipped
+  // with the Duemilanove and previous boards and the firmware on the 8U2
+  // on the Uno and Mega 2560.
+  if (baud == 57600) {
+    use_u2x = false;
+  }
+#endif
 
-          if (use_u2x) {
-            *_ucsra = 1 << _u2x;
-            baud_setting = (F_CPU / 4 / baud - 1) / 2;
-          } else {
-            *_ucsra = 0;
-            baud_setting = (F_CPU / 8 / baud - 1) / 2;
-          }
+try_again:
+  
+  if (use_u2x) {
+    *_ucsra = 1 << _u2x;
+    baud_setting = (F_CPU / 4 / baud - 1) / 2;
+  } else {
+    *_ucsra = 0;
+    baud_setting = (F_CPU / 8 / baud - 1) / 2;
+  }
+  
+  if ((baud_setting > 4095) && use_u2x)
+  {
+    use_u2x = false;
+    goto try_again;
+  }
 
-          if ((baud_setting > 4095) && use_u2x)
-          {
-            use_u2x = false;
-            goto try_again;
-          }
+  // assign the baud_setting, a.k.a. ubbr (USART Baud Rate Register)
+  *_ubrrh = baud_setting >> 8;
+  *_ubrrl = baud_setting;
 
-        //set 9 bit off in *_ucsrb here to be sure its 0
-        *_ucsrb &= 4;
-        switch(data_bits) {
-                case 5: frame_format = 0; break; // 5 data bits
-                case 6: frame_format = (1<<_ucsz0); break; // 6 data bits
-                case 7: frame_format = (2<<_ucsz0); break; // 7 data bits
-                case 8: frame_format = (3<<_ucsz0); break;// 8 data bits
-                case 9:
-                	frame_format = (3<<_ucsz0); // 9 data bits
-                	*_ucsrb |= 4;
-                	break;
-                default: frame_format = (3<<_ucsz0); break;// 8 data bits
-        }
-
-        if(stop_bits==2) frame_format |= (1<<_usbs);
-
-        switch(parity) {
-                case 1: frame_format |= (3<<_upm0); break; // odd parity
-                case 2: frame_format |= (2<<_upm0); break; // even parity
-                default: break; // disabled parity
-        }
-
-        // assign the baud_setting, a.k.a. ubbr ( USART Baud Rate Register )
-	*_ubrrh = baud_setting >> 8;
-	*_ubrrl = baud_setting;
-
-        // enable the serial recieve pin, transmit pin, and recieve interrupt
-        *_ucsrb |= (1 << _rxen);
-	*_ucsrb |= (1 << _txen) ;
-	*_ucsrb |= (1 << _rxcie);
-
-        // Set frame format
-        *_ucsrc = frame_format;
+  //set the data bits, parity, and stop bits
+#if defined(__AVR_ATmega8__)
+  config |= 0x80; // select UCSRC register (shared with UBRRH)
+#endif
+  if((config == SERIAL_9N1)){
+	  //9 bit seatalk
+	  *_ucsrc = SERIAL_8N1;
+	  //UCSRB bit 4 on, makes 9 bit data tx/rx
+	  //The 9th bit is read and written by using the RXB8 and TXB8 bits in UCSRB, respectively.
+	  *_ucsrb |= 4;
+  }else{
+	  //UCSRB set 9 bit off in *_ucsrb here to be sure its 0
+	  *_ucsrb &= 4;
+	  *_ucsrc = config;
+  }
+  sbi(*_ucsrb, _rxen);
+  sbi(*_ucsrb, _txen);
+  sbi(*_ucsrb, _rxcie);
+  cbi(*_ucsrb, _udrie);
 }
 
 void HardwareSerial::end()
@@ -461,8 +472,9 @@ int HardwareSerial::read(void)
 
 void HardwareSerial::flush()
 {
-  while (_tx_buffer->head != _tx_buffer->tail)
-    ;
+  // UDR is kept full while the buffer is not empty, so TXC triggers when EMPTY && SENT
+  while (transmitting && ! (*_ucsra & _BV(TXC0)));
+  transmitting = false;
 }
 
 size_t HardwareSerial::write(uint8_t c)
@@ -479,41 +491,52 @@ size_t HardwareSerial::write(uint8_t c)
   _tx_buffer->head = i;
 	
   sbi(*_ucsrb, _udrie);
+  // clear the TXC bit -- "can be cleared by writing a one to its bit location"
+  transmitting = true;
+  sbi(*_ucsra, TXC0);
   
   return 1;
 }
 
-//New write method, and setup methods
+//9 bit seatalk protocol
 size_t HardwareSerial::write9(uint8_t c, bool p)
 {
-	int i = (_tx_buffer->head + 1) % SERIAL_BUFFER_SIZE;
+  int i = (_tx_buffer->head + 1) % SERIAL_BUFFER_SIZE;
 
-	  // If the output buffer is full, there's nothing for it other than to
-	  // wait for the interrupt handler to empty it a bit
-	  // ???: return 0 here instead?
-	  while (i == _tx_buffer->tail)
-	    ;
+  // If the output buffer is full, there's nothing for it other than to
+  // wait for the interrupt handler to empty it a bit
+  // ???: return 0 here instead?
+  while (i == _tx_buffer->tail)
+    ;
 
-	  _tx_buffer->buffer[_tx_buffer->head] = c;
-	  _tx_buffer->head = i;
+  _tx_buffer->buffer[_tx_buffer->head] = c;
+  _tx_buffer->head = i;
 
   //set TXB8 (bit 0) with 1 or 0
-  if(p ){
-    *_ucsrb=*_ucsrb | B00000001;
-  }else{
-    *_ucsrb=*_ucsrb & B11111110;
-  }
+    if(p ){
+      *_ucsrb=*_ucsrb | B00000001;
+    }else{
+      *_ucsrb=*_ucsrb & B11111110;
+    }
+
   sbi(*_ucsrb, _udrie);
+  // clear the TXC bit -- "can be cleared by writing a one to its bit location"
+  transmitting = true;
+  sbi(*_ucsra, TXC0);
 
   return 1;
+}
+
+HardwareSerial::operator bool() {
+	return true;
 }
 
 // Preinstantiate Objects //////////////////////////////////////////////////////
 
 #if defined(UBRRH) && defined(UBRRL)
-  HardwareSerial Serial(&rx_buffer, &tx_buffer, &UBRRH, &UBRRL, &UCSRA, &UCSRB, &UCSRC, &UDR, RXEN, TXEN, RXCIE, UDRIE, U2X, UCSZ0, UPM0, USBS);
+  HardwareSerial Serial(&rx_buffer, &tx_buffer, &UBRRH, &UBRRL, &UCSRA, &UCSRB, &UCSRC, &UDR, RXEN, TXEN, RXCIE, UDRIE, U2X);
 #elif defined(UBRR0H) && defined(UBRR0L)
-  HardwareSerial Serial(&rx_buffer, &tx_buffer, &UBRR0H, &UBRR0L, &UCSR0A, &UCSR0B, &UCSR0C, &UDR0, RXEN0, TXEN0, RXCIE0, UDRIE0, U2X0, UCSZ00, UPM00, USBS0);
+  HardwareSerial Serial(&rx_buffer, &tx_buffer, &UBRR0H, &UBRR0L, &UCSR0A, &UCSR0B, &UCSR0C, &UDR0, RXEN0, TXEN0, RXCIE0, UDRIE0, U2X0);
 #elif defined(USBCON)
   // do nothing - Serial object and buffers are initialized in CDC code
 #else
@@ -521,13 +544,13 @@ size_t HardwareSerial::write9(uint8_t c, bool p)
 #endif
 
 #if defined(UBRR1H)
-  HardwareSerial Serial1(&rx_buffer1, &tx_buffer1, &UBRR1H, &UBRR1L, &UCSR1A, &UCSR1B, &UCSR1C, &UDR1, RXEN1, TXEN1, RXCIE1, UDRIE1, U2X1, UCSZ10, UPM10, USBS1);
+  HardwareSerial Serial1(&rx_buffer1, &tx_buffer1, &UBRR1H, &UBRR1L, &UCSR1A, &UCSR1B, &UCSR1C, &UDR1, RXEN1, TXEN1, RXCIE1, UDRIE1, U2X1);
 #endif
 #if defined(UBRR2H)
-  HardwareSerial Serial2(&rx_buffer2, &tx_buffer2, &UBRR2H, &UBRR2L, &UCSR2A, &UCSR2B, &UCSR2C, &UDR2, RXEN2, TXEN2, RXCIE2, UDRIE2, U2X2, UCSZ20, UPM20, USBS2);
+  HardwareSerial Serial2(&rx_buffer2, &tx_buffer2, &UBRR2H, &UBRR2L, &UCSR2A, &UCSR2B, &UCSR2C, &UDR2, RXEN2, TXEN2, RXCIE2, UDRIE2, U2X2);
 #endif
 #if defined(UBRR3H)
-  HardwareSerial Serial3(&rx_buffer3, &tx_buffer3, &UBRR3H, &UBRR3L, &UCSR3A, &UCSR3B, &UCSR3C, &UDR3, RXEN3, TXEN3, RXCIE3, UDRIE3, U2X3, UCSZ30, UPM30, USBS3);
+  HardwareSerial Serial3(&rx_buffer3, &tx_buffer3, &UBRR3H, &UBRR3L, &UCSR3A, &UCSR3B, &UCSR3C, &UDR3, RXEN3, TXEN3, RXCIE3, UDRIE3, U2X3);
 #endif
 
 #endif // whole file
